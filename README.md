@@ -226,3 +226,5 @@ from those values. Reloading a page or restarting the laptop recovers the exact 
    profile table exists but Supabase Auth is not wired.
 6. **The sync queue is process-local in behaviour** and pushes in batches; a very large
    backlog will take several runs.
+#   S p o r t s - E v e n t - M a n a g e m e n t - S y s t e m  
+ 
