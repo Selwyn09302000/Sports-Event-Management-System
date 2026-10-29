@@ -17,7 +17,7 @@ import {
   updateRosterEntry,
   updateTournament,
 } from "@/lib/repos/tournaments";
-import { clearDivisionSchedule, generateDivisionSchedule } from "@/lib/repos/schedule";
+import { clearDivisionSchedule, generateDivisionSchedule, rescheduleGame, scheduleByNights } from "@/lib/repos/schedule";
 import { runFormAction } from "./helpers";
 
 const text = (value: FormDataEntryValue | null, max = 500) => (typeof value === "string" ? value.trim().slice(0, max) : "");
@@ -299,5 +299,67 @@ export async function clearScheduleAction(formData: FormData) {
     });
     revalidatePath(`/dashboard/tournaments/${tournamentId}`);
     return `Cleared ${removed} scheduled game(s).`;
+  });
+}
+
+export async function rescheduleGameAction(formData: FormData) {
+  const session = await requirePermissionSession("tournament.manage");
+  const tournamentId = text(formData.get("tournamentId"));
+  return runFormAction(formData, `/dashboard/tournaments/${tournamentId}`, async () => {
+    const result = rescheduleGame({
+      organizationId: session.organizationId,
+      gameId: text(formData.get("gameId")),
+      scheduledAt: optional(formData.get("scheduledAt")),
+      venueId: optional(formData.get("venueId")),
+      actor: { userId: session.userId, name: session.userName },
+    });
+    revalidatePath(`/dashboard/tournaments/${tournamentId}`);
+    return result.conflicts.length
+      ? `Game updated. Heads up: ${result.conflicts.map((conflict) => conflict.message).join(" ")}`
+      : "Game updated.";
+  });
+}
+
+export async function scheduleByNightsAction(formData: FormData) {
+  const session = await requirePermissionSession("tournament.manage");
+  const tournamentId = text(formData.get("tournamentId"));
+  return runFormAction(formData, `/dashboard/tournaments/${tournamentId}`, async () => {
+    const startDate = text(formData.get("startDate"));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw invalid("Choose the first night.");
+    const nightCount = Math.min(60, Math.max(1, Math.floor(Number(formData.get("nightCount") ?? 1)) || 1));
+    const everyDays = Math.min(14, Math.max(1, Math.floor(Number(formData.get("everyDays") ?? 1)) || 1));
+
+    // Pure calendar arithmetic in UTC so daylight-saving never shifts a date.
+    const nights: string[] = [];
+    const [year, month, day] = startDate.split("-").map(Number);
+    for (let index = 0; index < nightCount; index += 1) {
+      const date = new Date(Date.UTC(year, month - 1, day + index * everyDays));
+      nights.push(date.toISOString().slice(0, 10));
+    }
+
+    const perDivision: { divisionId: string; gamesPerNight: number }[] = [];
+    for (const [key, value] of formData.entries()) {
+      if (!key.startsWith("perNight_")) continue;
+      const gamesPerNight = Math.min(20, Math.max(0, Math.floor(Number(value)) || 0));
+      perDivision.push({ divisionId: key.slice("perNight_".length), gamesPerNight });
+    }
+
+    const result = scheduleByNights({
+      organizationId: session.organizationId,
+      tournamentId,
+      nights,
+      startTime: text(formData.get("startTime")) || "18:00",
+      gapMinutes: Number(formData.get("gapMinutes") ?? 60) || 60,
+      venueId: optional(formData.get("venueId")),
+      perDivision,
+      overwrite: text(formData.get("overwrite")) === "1",
+      actor: { userId: session.userId, name: session.userName },
+    });
+
+    revalidatePath(`/dashboard/tournaments/${tournamentId}`);
+    const parts = [`Scheduled ${result.assigned} game(s) over ${nights.length} night(s).`];
+    if (result.unassigned > 0) parts.push(`${result.unassigned} game(s) still need a night, add more nights and run it again.`);
+    if (result.conflicts.length > 0) parts.push(`${result.conflicts.length} conflict(s) flagged.`);
+    return parts.join(" ");
   });
 }

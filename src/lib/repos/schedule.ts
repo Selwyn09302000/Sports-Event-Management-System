@@ -1,4 +1,4 @@
-import { AppError, invalid } from "../domain/errors";
+import { AppError, invalid, notFound } from "../domain/errors";
 import { newId, nowIso } from "../domain/ids";
 import { parseRuleset } from "../domain/ruleset";
 import {
@@ -28,6 +28,7 @@ export type GameSummary = {
   awayShort: string | null;
   homeColor: string | null;
   awayColor: string | null;
+  venueId: string | null;
   venueName: string | null;
   scheduledAt: string | null;
   status: string;
@@ -71,6 +72,7 @@ export function mapGameSummary(row: Record<string, unknown>): GameSummary {
     awayShort: (row.away_short as string) ?? null,
     homeColor: (row.home_color as string) ?? null,
     awayColor: (row.away_color as string) ?? null,
+    venueId: (row.venue_id as string) ?? null,
     venueName: (row.venue_name as string) ?? null,
     scheduledAt: (row.scheduled_at as string) ?? null,
     status: row.status as string,
@@ -433,4 +435,209 @@ function addMinutes(base: string | null, minutes: number): string | null {
   const parsed = new Date(base);
   if (Number.isNaN(parsed.getTime())) return null;
   return new Date(parsed.getTime() + minutes * 60_000).toISOString();
+}
+
+// ---------------------------------------------------------------------------
+// Flexible scheduling: per-game edits and "games per night" planning
+// ---------------------------------------------------------------------------
+
+function parseLocalDateTime(value: string, label: string): Date {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw invalid(`${label} is not a valid date and time.`);
+  return parsed;
+}
+
+function tournamentGameInputs(organizationId: string, tournamentId: string): ConflictInput[] {
+  return all<{ id: string; home_team_id: string; away_team_id: string; scheduled_at: string | null; venue_id: string | null }>(
+    `SELECT id, home_team_id, away_team_id, scheduled_at, venue_id FROM games
+      WHERE organization_id = ? AND tournament_id = ?`,
+    [organizationId, tournamentId],
+  ).map((row) => ({
+    id: row.id,
+    homeTeamId: row.home_team_id,
+    awayTeamId: row.away_team_id,
+    scheduledAt: row.scheduled_at,
+    venueId: row.venue_id,
+  }));
+}
+
+/**
+ * Moves one game that has not started to a new date/time and/or venue.
+ * Conflicts are reported as warnings, not errors: management has the final say.
+ */
+export function rescheduleGame(input: {
+  organizationId: string;
+  gameId: string;
+  scheduledAt: string | null;
+  venueId: string | null;
+  actor: { userId: string; name: string };
+}): { conflicts: ScheduleConflict[] } {
+  return transaction(() => {
+    const game = one<{
+      id: string;
+      tournament_id: string;
+      home_team_id: string;
+      away_team_id: string;
+      status: string;
+      last_event_seq: number;
+      scheduled_at: string | null;
+      venue_id: string | null;
+    }>(
+      `SELECT id, tournament_id, home_team_id, away_team_id, status, last_event_seq, scheduled_at, venue_id
+         FROM games WHERE id = ? AND organization_id = ?`,
+      [input.gameId, input.organizationId],
+    );
+    if (!game) throw notFound("Game");
+    if (game.status !== "scheduled" || game.last_event_seq > 0) {
+      throw new AppError("conflict", "Only games that have not started can be rescheduled.");
+    }
+
+    const scheduledAt = input.scheduledAt ? parseLocalDateTime(input.scheduledAt, "Game time").toISOString() : null;
+
+    if (input.venueId) {
+      const venue = one<{ id: string }>("SELECT id FROM venues WHERE id = ? AND organization_id = ? AND tournament_id = ?", [
+        input.venueId,
+        input.organizationId,
+        game.tournament_id,
+      ]);
+      if (!venue) throw invalid("That venue does not belong to this tournament.");
+    }
+
+    const others = tournamentGameInputs(input.organizationId, game.tournament_id);
+    const conflicts = detectConflicts(
+      { id: game.id, homeTeamId: game.home_team_id, awayTeamId: game.away_team_id, scheduledAt, venueId: input.venueId },
+      others,
+    ).filter((conflict) => conflict.kind !== "duplicate_matchup");
+
+    run("UPDATE games SET scheduled_at = ?, venue_id = ?, updated_at = ? WHERE id = ?", [
+      scheduledAt,
+      input.venueId,
+      nowIso(),
+      game.id,
+    ]);
+
+    recordAudit({
+      organizationId: input.organizationId,
+      actorUserId: input.actor.userId,
+      actorName: input.actor.name,
+      action: "game.rescheduled",
+      entityType: "game",
+      entityId: game.id,
+      before: { scheduledAt: game.scheduled_at, venueId: game.venue_id },
+      after: { scheduledAt, venueId: input.venueId },
+    });
+
+    return { conflicts };
+  });
+}
+
+/**
+ * Spreads unplayed games over a set of nights. Each night, every division gets
+ * its own "games per night" quota (0 skips the division), played back to back
+ * in the order given, `gapMinutes` apart. Everything stays editable afterwards.
+ */
+export function scheduleByNights(input: {
+  organizationId: string;
+  tournamentId: string;
+  nights: string[]; // YYYY-MM-DD
+  startTime: string; // HH:mm
+  gapMinutes: number;
+  venueId: string | null;
+  perDivision: { divisionId: string; gamesPerNight: number }[];
+  /** When false, games that already have a time are left alone. */
+  overwrite: boolean;
+  actor: { userId: string; name: string };
+}): { assigned: number; unassigned: number; conflicts: ScheduleConflict[] } {
+  getTournament(input.organizationId, input.tournamentId);
+  if (input.nights.length === 0) throw invalid("Choose at least one night.");
+  if (!/^\d{2}:\d{2}$/.test(input.startTime)) throw invalid("Start time must look like 18:30.");
+  if (!Number.isFinite(input.gapMinutes) || input.gapMinutes < 5) throw invalid("Gap must be at least 5 minutes.");
+  const quotas = input.perDivision.filter((entry) => entry.gamesPerNight > 0);
+  if (quotas.length === 0) throw invalid("Set games per night for at least one division.");
+
+  return transaction(() => {
+    if (input.venueId) {
+      const venue = one<{ id: string }>("SELECT id FROM venues WHERE id = ? AND organization_id = ? AND tournament_id = ?", [
+        input.venueId,
+        input.organizationId,
+        input.tournamentId,
+      ]);
+      if (!venue) throw invalid("That venue does not belong to this tournament.");
+    }
+
+    type Pending = { id: string; homeTeamId: string; awayTeamId: string };
+    const queues = new Map<string, Pending[]>();
+    const moving = new Set<string>();
+    for (const quota of quotas) {
+      const rows = all<{ id: string; home_team_id: string; away_team_id: string }>(
+        `SELECT id, home_team_id, away_team_id FROM games
+          WHERE organization_id = ? AND tournament_id = ? AND division_id = ?
+            AND status = 'scheduled' AND last_event_seq = 0
+            ${input.overwrite ? "" : "AND scheduled_at IS NULL"}
+          ORDER BY round_number, COALESCE(bracket_slot, 0), created_at, rowid`,
+        [input.organizationId, input.tournamentId, quota.divisionId],
+      );
+      queues.set(
+        quota.divisionId,
+        rows.map((row) => ({ id: row.id, homeTeamId: row.home_team_id, awayTeamId: row.away_team_id })),
+      );
+      rows.forEach((row) => moving.add(row.id));
+    }
+
+    // Games that stay where they are still count for conflict detection.
+    const accumulated: ConflictInput[] = tournamentGameInputs(input.organizationId, input.tournamentId).filter(
+      (entry) => !entry.id || !moving.has(entry.id),
+    );
+    const conflicts: ScheduleConflict[] = [];
+    let assigned = 0;
+
+    for (const night of input.nights) {
+      let cursor = parseLocalDateTime(`${night}T${input.startTime}`, `Night ${night}`).getTime();
+      for (const quota of quotas) {
+        const queue = queues.get(quota.divisionId) ?? [];
+        for (let count = 0; count < quota.gamesPerNight && queue.length > 0; count += 1) {
+          const game = queue.shift()!;
+          const scheduledAt = new Date(cursor).toISOString();
+          const found = detectConflicts(
+            { id: game.id, homeTeamId: game.homeTeamId, awayTeamId: game.awayTeamId, scheduledAt, venueId: input.venueId },
+            accumulated,
+            input.gapMinutes,
+          ).filter((conflict) => conflict.kind !== "duplicate_matchup");
+          conflicts.push(...found);
+
+          run(
+            input.venueId
+              ? "UPDATE games SET scheduled_at = ?, venue_id = ?, updated_at = ? WHERE id = ?"
+              : "UPDATE games SET scheduled_at = ?, updated_at = ? WHERE id = ?",
+            input.venueId
+              ? [scheduledAt, input.venueId, nowIso(), game.id]
+              : [scheduledAt, nowIso(), game.id],
+          );
+          accumulated.push({
+            id: game.id,
+            homeTeamId: game.homeTeamId,
+            awayTeamId: game.awayTeamId,
+            scheduledAt,
+            venueId: input.venueId,
+          });
+          assigned += 1;
+          cursor += input.gapMinutes * 60_000;
+        }
+      }
+    }
+
+    const unassigned = [...queues.values()].reduce((total, queue) => total + queue.length, 0);
+
+    recordAudit({
+      organizationId: input.organizationId,
+      actorUserId: input.actor.userId,
+      actorName: input.actor.name,
+      action: "schedule.by_nights",
+      entityType: "tournament",
+      entityId: input.tournamentId,
+      after: { nights: input.nights, startTime: input.startTime, gapMinutes: input.gapMinutes, assigned, unassigned },
+    });
+
+    return { assigned, unassigned, conflicts };
+  });
 }

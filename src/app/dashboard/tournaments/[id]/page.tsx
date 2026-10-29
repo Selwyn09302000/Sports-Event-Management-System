@@ -7,6 +7,8 @@ import {
   createVenueAction,
   generateScheduleAction,
   registerTeamAction,
+  rescheduleGameAction,
+  scheduleByNightsAction,
   setRosterLockAction,
   setTournamentStatusAction,
   updateRosterEntryAction,
@@ -29,6 +31,15 @@ import { GAME_STATUS_LABELS, type GameStatus } from "@/lib/domain/game-state";
 import { AppError } from "@/lib/domain/errors";
 
 export const dynamic = "force-dynamic";
+
+/** ISO timestamp -> value for <input type="datetime-local">. */
+function toLocalInput(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 export default async function TournamentDetailPage({
   params,
@@ -54,7 +65,13 @@ export default async function TournamentDetailPage({
   const players = listPlayers(session.organizationId);
   const registered = listTournamentTeams(session.organizationId, tournament.id);
   const venues = listVenues(session.organizationId, tournament.id);
-  const games = listTournamentGames(session.organizationId, tournament.id);
+  // Show games in playing order: timed games first (earliest first), unscheduled last.
+  const games = [...listTournamentGames(session.organizationId, tournament.id)].sort((a, b) => {
+    if (a.scheduledAt && b.scheduledAt) return a.scheduledAt.localeCompare(b.scheduledAt);
+    if (a.scheduledAt) return -1;
+    if (b.scheduledAt) return 1;
+    return 0;
+  });
   const roster = listRoster(session.organizationId, tournament.id);
 
   const canManage = hasPermission(session.roles, "tournament.manage");
@@ -526,6 +543,76 @@ export default async function TournamentDetailPage({
           }
         />
 
+        {canManage && games.length > 0 ? (
+          <details className="card mb-4 p-4">
+            <summary className="cursor-pointer font-semibold">Plan nights (games per night)</summary>
+            <p className="muted mt-2">
+              Spread the unplayed games over several nights. Set how many games each division plays per night
+              (0 skips a division). You can still change any single game afterwards.
+            </p>
+            <form action={scheduleByNightsAction} className="mt-3 space-y-3">
+              <input type="hidden" name="tournamentId" value={tournament.id} />
+              <input type="hidden" name="returnTo" value={returnTo} />
+              <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                <div>
+                  <label className="label">First night</label>
+                  <input name="startDate" type="date" className="input" required />
+                </div>
+                <div>
+                  <label className="label">Number of nights</label>
+                  <input name="nightCount" type="number" min={1} max={60} defaultValue={3} className="input" />
+                </div>
+                <div>
+                  <label className="label">Every (days)</label>
+                  <input name="everyDays" type="number" min={1} max={14} defaultValue={1} className="input" />
+                </div>
+                <div>
+                  <label className="label">Start time</label>
+                  <input name="startTime" type="time" defaultValue="18:00" className="input" required />
+                </div>
+                <div>
+                  <label className="label">Gap (min)</label>
+                  <input name="gapMinutes" type="number" min={5} step={5} defaultValue={60} className="input" />
+                </div>
+                <div>
+                  <label className="label">Venue</label>
+                  <select name="venueId" className="input" defaultValue="">
+                    <option value="">Keep current</option>
+                    {venues.map((venue) => (
+                      <option key={venue.id} value={venue.id}>
+                        {venue.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <p className="label">Games per night, per division (in playing order)</p>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  {divisions.map((division) => (
+                    <label key={division.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                      <span className="font-semibold">{division.name}</span>
+                      <input
+                        name={`perNight_${division.id}`}
+                        type="number"
+                        min={0}
+                        max={20}
+                        defaultValue={2}
+                        className="input w-20"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" name="overwrite" value="1" />
+                Also re-time games that already have a time
+              </label>
+              <button className="btn-accent">Apply plan</button>
+            </form>
+          </details>
+        ) : null}
+
         {games.length === 0 ? (
           <EmptyState title="No games scheduled" description="Generate a schedule for a division above." />
         ) : (
@@ -553,7 +640,35 @@ export default async function TournamentDetailPage({
                       </p>
                       <p className="text-xs text-slate-500">{game.divisionName}</p>
                     </td>
-                    <td className="whitespace-nowrap text-xs text-slate-600">{formatDateTime(game.scheduledAt)}</td>
+                    <td className="text-xs text-slate-600">
+                      <p className="whitespace-nowrap">{formatDateTime(game.scheduledAt)}</p>
+                      {game.venueName ? <p className="text-slate-400">{game.venueName}</p> : null}
+                      {canManage && game.status === "scheduled" && game.lastEventSeq === 0 ? (
+                        <details className="mt-1">
+                          <summary className="cursor-pointer font-semibold text-blue-700">Change</summary>
+                          <form action={rescheduleGameAction} className="mt-2 flex flex-wrap items-end gap-2">
+                            <input type="hidden" name="tournamentId" value={tournament.id} />
+                            <input type="hidden" name="gameId" value={game.id} />
+                            <input type="hidden" name="returnTo" value={returnTo} />
+                            <input
+                              name="scheduledAt"
+                              type="datetime-local"
+                              className="input w-52"
+                              defaultValue={toLocalInput(game.scheduledAt)}
+                            />
+                            <select name="venueId" className="input w-40" defaultValue={game.venueId ?? ""}>
+                              <option value="">No venue</option>
+                              {venues.map((venue) => (
+                                <option key={venue.id} value={venue.id}>
+                                  {venue.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button className="btn-outline btn-sm">Save</button>
+                          </form>
+                        </details>
+                      ) : null}
+                    </td>
                     <td className="font-mono font-bold">
                       {game.homeScore}–{game.awayScore}
                     </td>
