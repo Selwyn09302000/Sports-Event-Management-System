@@ -1,0 +1,27 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# local data / secrets
+data/
+*.db
+*.db-wal
+*.db-shm
+backups/
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# test artifacts and local logs
+test-results/
+playwright-report/
+.logs/
+blob-report/
+.DS_Store
+Thumbs.db

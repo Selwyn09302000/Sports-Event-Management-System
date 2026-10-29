@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  --color-court-50: #fff7ed;
+  --color-court-500: #f97316;
+  --color-court-600: #ea580c;
+  --color-court-700: #c2410c;
+  --color-ink-900: #0b1220;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-slate-100 text-slate-900 antialiased;
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-orange-500;
+  }
+}
+
+@layer components {
+  .card,
+  .card-pad {
+    @apply rounded-xl border border-slate-200 bg-white shadow-sm;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+  .btn,
+  .btn-primary,
+  .btn-accent,
+  .btn-outline,
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-transparent px-3.5 py-2
+      text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-slate-900 text-white hover:bg-slate-800;
+  }
+  .btn-accent {
+    @apply bg-orange-600 text-white hover:bg-orange-500;
+  }
+  .btn-outline {
+    @apply border-slate-300 bg-white text-slate-800 hover:bg-slate-50;
+  }
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-500;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+  .label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600;
+  }
+  .input {
+    @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900
+      placeholder:text-slate-400 focus:border-orange-500 focus:outline-none;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+  .table-base {
+    @apply w-full border-collapse text-sm;
+  }
+  .table-base th {
+    @apply border-b border-slate-200 bg-slate-50 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-600;
+  }
+  .table-base td {
+    @apply border-b border-slate-100 px-3 py-2 align-middle;
+  }
+  .muted {
+    @apply text-sm text-slate-600;
+  }
+  .section-title {
+    @apply text-lg font-bold tracking-tight text-slate-900;
+  }
+}
+
+/* Projector: no scrollbars, no accidental selection on a wall display. */
+.projector {
+  @apply bg-black text-white;
+  user-select: none;
+  cursor: none;
+}
+.projector .tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
