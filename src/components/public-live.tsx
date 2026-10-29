@@ -37,8 +37,8 @@ export function PublicLive({ gameId, initial }: { gameId: string; initial: Score
 
   const remainingMs = useMemo(() => {
     if (!view.clock.running) return view.clock.remainingMs;
-    const anchor = Date.parse(view.clock.anchorAt);
-    return Math.max(0, view.clock.remainingMs - (clockNow + offsetRef.current - anchor));
+const anchor = Date.parse(view.clock.serverNow);
+return Math.max(0, view.clock.remainingMs - (clockNow + offsetRef.current - anchor));
   }, [clockNow, view.clock]);
 
   return (

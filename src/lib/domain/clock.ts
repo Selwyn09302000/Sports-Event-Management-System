@@ -61,9 +61,10 @@ export function displaySeconds(remainingMs: number): number {
 
 export function formatClock(remainingMs: number): string {
   const safeMs = Math.max(0, remainingMs);
-  if (safeMs < 60_000) {
-    // Under a minute, basketball scoreboards show tenths: 9.4, 0.2, 0.0.
     const tenths = Math.ceil(safeMs / 100);
+  if (tenths < 600) {
+    // Under a minute, basketball scoreboards show tenths: 9.4, 0.2, 0.0.
+    // (tenths reaching 600 means 59.9+ seconds, which shows as 1:00 below.)
     return `${Math.floor(tenths / 10)}.${tenths % 10}`;
   }
   const totalSeconds = Math.ceil(safeMs / 1000);

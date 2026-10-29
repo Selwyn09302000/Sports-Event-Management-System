@@ -1178,7 +1178,31 @@ export function correctFinalResult(input: {
       "SELECT * FROM game_results WHERE game_id = ? AND status = 'approved' ORDER BY created_at DESC LIMIT 1",
       [game.id],
     );
-    if (!previous) throw notFound("Approved result");
+        if (!previous) throw notFound("Approved result");
+
+    // If the correction flips the winner, the team already placed in the
+    // next-round game would be stale. Fix it while that game has not started;
+    // refuse once it has, because its events would belong to the wrong team.
+    if (game.stage !== "group") {
+      const slot = game.bracket_slot ?? 0;
+      const nextGame = one<{ id: string; status: string; last_event_seq: number }>(
+        "SELECT id, status, last_event_seq FROM games WHERE division_id = ? AND round_number = ? AND bracket_slot = ?",
+        [game.division_id, game.round_number + 1, Math.ceil(slot / 2)],
+      );
+      const oldWinnerId = previous.home_score > previous.away_score ? game.home_team_id : game.away_team_id;
+      const newWinnerId = input.homeScore > input.awayScore ? game.home_team_id : game.away_team_id;
+      if (nextGame && oldWinnerId !== newWinnerId) {
+        if (nextGame.status !== "scheduled" || nextGame.last_event_seq > 0) {
+          throw new AppError(
+            "conflict",
+            "The next bracket game has already started, so this result can no longer change the winner.",
+          );
+        }
+        // Odd slots feed the home side, even slots the away side (see sweepBracket).
+        const column = slot % 2 === 1 ? "home_team_id" : "away_team_id";
+        run(`UPDATE games SET ${column} = ?, updated_at = ? WHERE id = ?`, [newWinnerId, nowIso(), nextGame.id]);
+      }
+    }
 
     const now = nowIso();
     run("UPDATE game_results SET status = 'superseded' WHERE game_id = ? AND status = 'approved'", [game.id]);

@@ -72,9 +72,9 @@ export function ScorerConsole({
 
   const remainingMs = useMemo(() => {
     if (!state.clock.running) return state.clock.remainingMs;
-    const anchor = Date.parse(state.clock.anchorAt);
-    const elapsed = now + offsetRef.current - anchor;
-    return Math.max(0, state.clock.remainingMs - elapsed);
+const anchor = Date.parse(state.clock.serverNow);
+const elapsed = now + offsetRef.current - anchor;
+return Math.max(0, state.clock.remainingMs - elapsed);
   }, [now, state.clock]);
 
   // Periodic reconciliation: another official's phone may be scoring too.
